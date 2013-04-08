@@ -371,13 +371,81 @@ clock_func(struct task *task, uint32_t events)
 	widget_schedule_redraw(clock->widget);
 }
 
+static int
+parse_vol(char *output)
+{
+	const char *sinkstr = "\nSink #0",
+		*volstr = "Volume: 0:",
+		*endvolstr = "\n";
+	char *start, *vol, *endv;
+	int vl, vr;
+
+	start = strstr(output, sinkstr);
+	if (start == NULL)
+		return -1;
+	vol = strstr(start, volstr);
+	if (vol == NULL)
+		return -2;
+	endv = strstr(vol, endvolstr);
+	if (endv == NULL)
+		return -3;
+	if (endv <= vol)
+		return -4;
+	if (endv < vol)
+		return -5;
+
+	if (2 != sscanf(vol, "Volume: 0:  %u%% 1:  %u%%", &vl, &vr))
+		return -6;
+
+	return vl > vr? vl : vr;
+}
+
+static int
+query_vol(void)
+{
+	int stat;
+	int pajpa[2];
+	pid_t p;
+	size_t size = 0, r;
+	char buf[32768];
+
+	if (pipe(pajpa) < 0)
+		return -1;
+
+	switch (p = fork()){
+	case 0:
+		close(1);
+		close(2);
+		if (dup(pajpa[1]) >= 0)
+			execlp("pactl", "pactl", "list", NULL);
+		_exit(-1);
+	break;
+	case -1:
+		return -1;
+	break;
+	default:
+		r = 0;
+		do {
+			r = read(pajpa[0], &buf[size], 1024);
+			size += r;
+		} while ((size < 32768) && (r == 1024));
+		buf[32767] = 0;
+	break;
+
+	}
+	waitpid(p, &stat, WNOHANG);
+
+	return parse_vol(buf);
+}
+
 static void configure_sound(unsigned char vol)
 {
 	char volstr[5];
 	sprintf(volstr, "%3u%%", (100*vol)/256);
 
 	if (fork() == 0) {
-		execlp("pactl", "pactl", "set-sink-volume", "0", volstr, NULL);
+		if (execlp("pactl", "pactl", "set-sink-volume", "0", volstr, NULL) < 0)
+			_exit(-1);
 	}
 }
 
@@ -560,6 +628,7 @@ static void
 panel_add_sound_volume(struct panel *panel)
 {
 	struct sound_volume *sound_volume;
+	int actual_volume = query_vol();
 
 	sound_volume = malloc(sizeof *sound_volume);
 	memset(sound_volume, 0, sizeof *sound_volume);
@@ -569,6 +638,8 @@ panel_add_sound_volume(struct panel *panel)
 	sound_volume->widget = widget_add_widget(panel->widget, sound_volume);
 	widget_set_redraw_handler(sound_volume->widget, sound_volume_redraw_handler);
 	widget_set_axis_handler(sound_volume->widget, sound_volume_axis_handler);
+
+	sound_volume->volume = actual_volume > 0 ? ((actual_volume * 255) / 100) : 0;
 }
 
 static void
